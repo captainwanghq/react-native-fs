@@ -3,6 +3,7 @@ package com.rnfs;
 import android.content.res.AssetFileDescriptor;
 import android.content.res.AssetManager;
 import android.database.Cursor;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Environment;
@@ -10,7 +11,6 @@ import android.os.StatFs;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.util.SparseArray;
-import android.media.MediaScannerConnection;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Promise;
@@ -59,7 +59,6 @@ public class RNFSManager extends ReactContextBaseJavaModule {
 
   private SparseArray<Downloader> downloaders = new SparseArray<>();
   private SparseArray<Uploader> uploaders = new SparseArray<>();
-
   private ReactApplicationContext reactContext;
 
   public RNFSManager(ReactApplicationContext reactContext) {
@@ -691,7 +690,6 @@ public class RNFSManager extends ReactContextBaseJavaModule {
             .getJSModule(RCTNativeAppEventEmitter.class)
             .emit(eventName, params);
   }
-
   @ReactMethod
   public void downloadFile(final ReadableMap options, final Promise promise) {
     try {
@@ -715,26 +713,22 @@ public class RNFSManager extends ReactContextBaseJavaModule {
       params.progressDivider = progressDivider;
       params.readTimeout = readTimeout;
       params.connectionTimeout = connectionTimeout;
-
       params.onTaskCompleted = new DownloadParams.OnTaskCompleted() {
         public void onTaskCompleted(DownloadResult res) {
           if (res.exception == null) {
             WritableMap infoMap = Arguments.createMap();
-
             infoMap.putInt("jobId", jobId);
             infoMap.putInt("statusCode", res.statusCode);
             infoMap.putDouble("bytesWritten", (double)res.bytesWritten);
-
             promise.resolve(infoMap);
           } else {
             reject(promise, options.getString("toFile"), res.exception);
           }
         }
       };
-
       if (hasBeginCallback) {
         params.onDownloadBegin = new DownloadParams.OnDownloadBegin() {
-          public void onDownloadBegin(int statusCode, long contentLength, Map<String, String> headers) {
+          public void onDownloadBegin(int statusCode,long bytesWritten, long contentLength, Map<String, String> headers) {
             WritableMap headersMap = Arguments.createMap();
 
             for (Map.Entry<String, String> entry : headers.entrySet()) {
@@ -747,12 +741,11 @@ public class RNFSManager extends ReactContextBaseJavaModule {
             data.putInt("statusCode", statusCode);
             data.putDouble("contentLength", (double)contentLength);
             data.putMap("headers", headersMap);
-
+            data.putDouble("bytesWritten",(double) bytesWritten);
             sendEvent(getReactApplicationContext(), "DownloadBegin", data);
           }
         };
       }
-
       if (hasProgressCallback) {
         params.onDownloadProgress = new DownloadParams.OnDownloadProgress() {
           public void onDownloadProgress(long contentLength, long bytesWritten) {
@@ -761,16 +754,13 @@ public class RNFSManager extends ReactContextBaseJavaModule {
             data.putInt("jobId", jobId);
             data.putDouble("contentLength", (double)contentLength);
             data.putDouble("bytesWritten", (double)bytesWritten);
-
             sendEvent(getReactApplicationContext(), "DownloadProgress", data);
           }
         };
       }
-
       Downloader downloader = new Downloader();
-
+      downloader.initThreadDaoImpl(getReactApplicationContext());
       downloader.execute(params);
-
       this.downloaders.put(jobId, downloader);
     } catch (Exception ex) {
       ex.printStackTrace();
@@ -781,7 +771,6 @@ public class RNFSManager extends ReactContextBaseJavaModule {
   @ReactMethod
   public void stopDownload(int jobId) {
     Downloader downloader = this.downloaders.get(jobId);
-
     if (downloader != null) {
       downloader.stop();
     }
