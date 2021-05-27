@@ -23,14 +23,15 @@
 
 #import <CommonCrypto/CommonDigest.h>
 #import <Photos/Photos.h>
-
+#import "DownloadService.h"
 
 @interface RNFSManager()
 
 @property (retain) NSMutableDictionary* downloaders;
 @property (retain) NSMutableDictionary* uuids;
 @property (retain) NSMutableDictionary* uploaders;
-
+@property (assign) NSTimeInterval lastProgressEmitTimestamp;
+@property (retain) NSNumber* lastProgressValue;
 @end
 
 @implementation RNFSManager
@@ -497,7 +498,7 @@ RCT_EXPORT_METHOD(downloadFile:(NSDictionary *)options
   bool hasResumableCallback = [options[@"hasResumableCallback"] boolValue];
 
   __block BOOL callbackFired = NO;
-
+    _lastProgressEmitTimestamp = 0;
   params.completeCallback = ^(NSNumber* statusCode, NSNumber* bytesWritten) {
     if (callbackFired) {
       return;
@@ -550,33 +551,78 @@ RCT_EXPORT_METHOD(downloadFile:(NSDictionary *)options
   }
 
   if (!self.downloaders) self.downloaders = [[NSMutableDictionary alloc] init];
+    DownloadRequest* requset = [[DownloadRequest alloc] init];
+    requset.sourceURLString = params.fromUrl;
+    requset.headURLString = params.fromUrl;
+    requset.downloadFilePath = params.toFile;
+    requset.downloadProgress =^(int64_t bytesReceived, int64_t totalBytesReceived, int64_t totalBytesExpectToReceived) {
+        // totalBytesReceived是当前客户端已经缓存了的字节数，totalBytesExpectToReceived是总共需要下载的字节数。
+            NSNumber *contentLength = @(totalBytesExpectToReceived);
+            NSNumber *bytesWritten = @(totalBytesReceived);
+            if(params.progressInterval.integerValue > 0){
+              NSTimeInterval timestamp = [[NSDate date] timeIntervalSince1970];
+              if(timestamp - self->_lastProgressEmitTimestamp > params.progressInterval.integerValue / 1000.0){
+                  self->_lastProgressEmitTimestamp = timestamp;
+                params.progressCallback(contentLength, bytesWritten);
+              }
+            }else if (params.progressDivider.integerValue <= 0) {
+               params.progressCallback(contentLength, bytesWritten);
+            } else {
+              double doubleBytesWritten = (double)[bytesWritten longValue];
+              double doubleContentLength = (double)[contentLength longValue];
+              double doublePercents = doubleBytesWritten / doubleContentLength * 100;
+              NSNumber* progress = [NSNumber numberWithUnsignedInt: floor(doublePercents)];
+              if ([progress unsignedIntValue] % [params.progressDivider integerValue] == 0) {
+                if (([progress unsignedIntValue] != [self->_lastProgressValue unsignedIntValue]) || ([bytesWritten unsignedIntegerValue] == [contentLength longValue])) {
+                    NSLog(@"---Progress callback EMIT--- %u", [progress unsignedIntValue]);
+                    self->_lastProgressValue = [NSNumber numberWithUnsignedInt:[progress unsignedIntValue]];
+                   params.progressCallback(contentLength, bytesWritten);
+                }
+              }
+            }
 
-  RNFSDownloader* downloader = [RNFSDownloader alloc];
+         
+    };
+    requset.success=^(NSDictionary *result) {
+        NSLog(@"下载成功");
+        NSNumber* status =result[@"statusCode"];
+        NSNumber* len = result[@"bytesWritten"];
+        params.completeCallback(status,len);
+    };
+    requset.failure=^(NSError *err) {
+        NSLog(@"下载失败");
+    };
+    DownloadService* service = [DownloadService downloadServiceWithRequest:requset];
+   
 
-  NSString *uuid = [downloader downloadFile:params];
-
-  [self.downloaders setValue:downloader forKey:[jobId stringValue]];
-    if (uuid) {
-        if (!self.uuids) self.uuids = [[NSMutableDictionary alloc] init];
-        [self.uuids setValue:uuid forKey:[jobId stringValue]];
-    }
+    [service resume];
+    [self.downloaders setValue:service forKey:[jobId stringValue]];
+//  RNFSDownloader* downloader = [RNFSDownloader alloc];
+//
+//      NSString *uuid = [downloader downloadFile:params];
+//
+//      [self.downloaders setValue:downloader forKey:[jobId stringValue]];
+//        if (uuid) {
+//            if (!self.uuids) self.uuids = [[NSMutableDictionary alloc] init];
+//            [self.uuids setValue:uuid forKey:[jobId stringValue]];
+//        }
 }
 
 RCT_EXPORT_METHOD(stopDownload:(nonnull NSNumber *)jobId)
 {
-  RNFSDownloader* downloader = [self.downloaders objectForKey:[jobId stringValue]];
+  DownloadService* downloader = [self.downloaders objectForKey:[jobId stringValue]];
 
   if (downloader != nil) {
-    [downloader stopDownload];
+    [downloader pause];
   }
 }
 
 RCT_EXPORT_METHOD(resumeDownload:(nonnull NSNumber *)jobId)
 {
-    RNFSDownloader* downloader = [self.downloaders objectForKey:[jobId stringValue]];
+    DownloadService* downloader = [self.downloaders objectForKey:[jobId stringValue]];
 
     if (downloader != nil) {
-        [downloader resumeDownload];
+        [downloader resume];
     }
 }
 
@@ -586,7 +632,6 @@ RCT_EXPORT_METHOD(isResumable:(nonnull NSNumber *)jobId
 )
 {
     RNFSDownloader* downloader = [self.downloaders objectForKey:[jobId stringValue]];
-
     if (downloader != nil) {
         resolve([NSNumber numberWithBool:[downloader isResumable]]);
     } else {
@@ -615,7 +660,8 @@ RCT_EXPORT_METHOD(uploadFiles:(NSDictionary *)options
 {
   RNFSUploadParams* params = [RNFSUploadParams alloc];
 
-  NSNumber* jobId = options[@"jobId"];
+  NSNumber* jobId = options
+    [@"jobId"];
   params.toUrl = options[@"toUrl"];
   params.files = options[@"files"];
   params.binaryStreamOnly = [[options objectForKey:@"binaryStreamOnly"] boolValue];
@@ -747,7 +793,7 @@ RCT_EXPORT_METHOD(getFSInfo:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromise
 
 
 // [PHAsset fetchAssetsWithALAssetURLs] is deprecated and not supported in Mac Catalyst
-#if !TARGET_OS_UIKITFORMAC && !TARGET_OS_OSX
+#if !TARGET_OS_UIKITFORMAC
 /**
  * iOS Only: copy images from the assets-library (camera-roll) to a specific path, asuming
  * JPEG-Images.
@@ -812,7 +858,7 @@ RCT_EXPORT_METHOD(copyAssetsFileIOS: (NSString *) imageUri
         imageOptions.resizeMode = PHImageRequestOptionsResizeModeNone;
     } else {
         targetSize = CGSizeApplyAffineTransform(size, CGAffineTransformMakeScale(scale, scale));
-        imageOptions.resizeMode = PHImageRequestOptionsResizeModeExact;
+        imageOptions.resizeMode = PHImageRequestOptionsResizeModeFast;
     }
 
     PHImageContentMode contentMode = PHImageContentModeAspectFill;
@@ -844,7 +890,7 @@ RCT_EXPORT_METHOD(copyAssetsFileIOS: (NSString *) imageUri
 #endif
 
 // [PHAsset fetchAssetsWithALAssetURLs] is deprecated and not supported in Mac Catalyst
-#if !TARGET_OS_UIKITFORMAC && !TARGET_OS_OSX
+#if !TARGET_OS_UIKITFORMAC
 /**
  * iOS Only: copy videos from the assets-library (camera-roll) to a specific path as mp4-file.
  *
@@ -882,16 +928,10 @@ RCT_EXPORT_METHOD(copyAssetsVideoIOS: (NSString *) imageUri
     if ([asset isKindOfClass:[AVURLAsset class]]) {
       NSURL *url = [(AVURLAsset *)asset URL];
       NSLog(@"Final URL %@",url);
-      BOOL writeResult = false;
-        
-      if (@available(iOS 9.0, *)) {
-          NSURL *destinationUrl = [NSURL fileURLWithPath:destination relativeToURL:nil];
-          writeResult = [[NSFileManager defaultManager] copyItemAtURL:url toURL:destinationUrl error:&error];
-      } else {
-          NSData *videoData = [NSData dataWithContentsOfURL:url];
-          writeResult = [videoData writeToFile:destination options:NSDataWritingAtomic error:&error];
-      }
-        
+      NSData *videoData = [NSData dataWithContentsOfURL:url];
+
+      BOOL writeResult = [videoData writeToFile:destination options:NSDataWritingAtomic error:&error];
+
       if(writeResult) {
         NSLog(@"video success");
       }
